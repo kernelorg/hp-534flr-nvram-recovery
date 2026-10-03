@@ -10,9 +10,10 @@ Zawartość repozytorium:
 |---|---|
 | `firmware/esp-serprog/` | Firmware zamieniający **ESP32 / ESP8266** w programator SPI dla [flashrom](https://flashrom.org) (protokół `serprog`) |
 | `tools/nvmtool.py` | Narzędzie do obrazów: analiza zrzutu, szablon bez danych karty, budowa obrazu dla konkretnej karty (Python 3, bez zależności) |
+| `tools/bnx2x_nvm.py` | Dostęp do NVRAM bezpośrednio z Linuksa przez PCI BAR0 karty: log MCP, odczyt, zapis (bez wylutowywania) |
 | `templates/` | Zanonimizowany szablon dla 534FLR-SFP+ (firmware 7.14.62, bez danych karty) |
 
-> Szablon w `templates/` nie zawiera danych karty (MAC, numer seryjny). Oryginalne zrzuty prawdziwych kart nie są tu przechowywane: każdy zawiera numer seryjny i adresy MAC konkretnej karty. Zob. [Skąd wziąć szablon](#4-skąd-wziąć-szablon).
+> Szablon w `templates/` nie zawiera danych karty (MAC, numer seryjny). Oryginalne zrzuty prawdziwych kart nie są tu przechowywane: każdy zawiera numer seryjny i adresy MAC konkretnej karty. Zob. [Skąd wziąć szablon](#5-skąd-wziąć-szablon).
 
 ---
 
@@ -28,9 +29,20 @@ bnx2x 0000:05:00.0: probe with driver bnx2x failed with error -22
 pci 0000:05:00.0: VPD access failed.  This is likely a firmware bug on this device.
 ```
 
-Procesor zarządzający (MCP) w BCM57810 uruchamia bootcode z pamięci flash, ale nie kończy inicjalizacji. W przypadku, od którego zaczął się ten projekt, CRC wszystkich obrazów w pamięci były poprawne, ale **bootcode miał wersję 7.16.15, a wszystkie moduły MCP — 7.13.75** (częściowa aktualizacja). `nvmtool.py info` wykrywa taką sytuację. Rozwiązaniem jest zapisanie pełnego, spójnego zestawu firmware z działającej karty z zachowaniem adresów MAC i numeru seryjnego własnej karty.
+Procesor zarządzający (MCP) w BCM57810 uruchamia bootcode z pamięci flash, ale nie kończy inicjalizacji. Przyczynę pokazuje jego własny bufor śledzenia (`bnx2x_nvm.py trace`, rozdział 3):
 
-Karty nie da się przeprogramować na miejscu (sterownik się nie ładuje), więc kość flash trzeba wylutować i zaprogramować programatorem.
+```
+MFW1 7.16.15 Begin, TS 0x965d72 SI 0x8020458.
+...
+no img 0x30000003
+load failure
+```
+
+W przypadku, od którego zaczął się ten projekt, kartę uszkodziła **przerwana aktualizacja firmware HPE**. Narzędzie *HPE QLogic NX2 Online Firmware Upgrade Utility* (CP064333, MBI 7.14.79 → 7.19.27) zapisało nowy bootcode 7.16.15, usunęło stare moduły MCP i zakończyło się błędem (`Return code: 7`), zanim zapisało nowe. CRC wszystkich obrazów w pamięci pozostały poprawne, ale bootcode nie znalazł wymaganego zestawu modułów. `nvmtool.py info` wykrywa taką sytuację. Rozwiązaniem jest zapisanie pełnego, spójnego zestawu firmware z działającej karty z zachowaniem adresów MAC i numeru seryjnego własnej karty.
+
+> ⚠️ Na tym samym serwerze (Debian 13 / Proxmox VE, jądro 7.0 — system nieobsługiwany) ta aktualizacja po raz drugi uszkodziła kartę w ten sam sposób. Po odzyskaniu karty **nie uruchamiaj** tam ponownie tego komponentu firmware NX2.
+
+Jeśli karta jest nadal widoczna na magistrali PCI, można ją odzyskać **bezpośrednio z Linuksa, bez wylutowywania pamięci** (rozdział 3). W przeciwnym razie kość trzeba wylutować i zaprogramować zewnętrznym programatorem (rozdział 4).
 
 ## 2. Pamięć flash M45PE16
 
@@ -52,9 +64,37 @@ Reset (pin 3) **musi** być podciągnięty do 3,3 V, inaczej kość pozostaje w 
 
 Ponadto rodzina M45PE **nie ma polecenia kasowania całej pamięci** (Bulk/Chip Erase), a jedynie Page Erase `0xDB` i Sector Erase `0xD8`. Od tego zależy wybór programatora.
 
-## 3. Programatory
+## 3. Odzyskiwanie z Linuksa bez wylutowywania
 
-### 3.1 TL866II+ (minipro): tylko odczyt
+Jeśli `lspci -nn -d 14e4:168e` pokazuje kartę, ale sterownik się nie ładuje, NVRAM można odczytywać i zapisywać przez własny interfejs NVRAM karty w PCI BAR0, tą samą sekwencją rejestrów, której używa sterownik bnx2x. `tools/bnx2x_nvm.py` wymaga tylko Pythona 3 i uprawnień root. Funkcja nie może być przypisana do sterownika; po nieudanym probe nie jest.
+
+```
+B=0000:05:00.0                                    # adres PCI funkcji 0
+
+python3 tools/bnx2x_nvm.py $B trace               # stan MCP i jego log: dlaczego się zatrzymał
+python3 tools/bnx2x_nvm.py $B read backup1.bin    # cała NVRAM 2 MB, ok. 2 s
+python3 tools/bnx2x_nvm.py $B read backup2.bin
+cmp backup1.bin backup2.bin
+python3 tools/nvmtool.py info backup1.bin
+```
+
+Zbuduj obraz dla swojej karty (rozdział 6) i zapisz go:
+
+```
+python3 tools/bnx2x_nvm.py $B testpage 0x180000   # test zapisu jednej strony, potem jej przywrócenie
+python3 tools/bnx2x_nvm.py $B write my_card_new.bin
+python3 tools/bnx2x_nvm.py $B read check.bin
+sha256sum my_card_new.bin check.bin               # muszą być identyczne
+```
+
+- `write` zapisuje ponownie tylko różniące się strony po 256 bajtów (zwykle kilkaset, to sekundy), a potem odczytuje i porównuje całą pamięć.
+- Kontroler NVRAM karty sam kasuje każdą stronę, więc M45PE16 daje się zapisać, choć TL866II+ tego nie potrafi.
+- Po zapisie **wyłącz serwer i odłącz zasilanie na 30–60 s**. MCP działa na zasilaniu dyżurnym i wczytuje bootcode ponownie dopiero po pełnym odłączeniu zasilania.
+- Jeśli zapis zostanie przerwany, karta może zniknąć z magistrali PCI; wtedy użyj zewnętrznego programatora (rozdział 4) i kopii zapasowej.
+
+## 4. Programatory
+
+### 4.1 TL866II+ (minipro): tylko odczyt
 
 TL866II+ potrafi kość **odczytać**, ale **nie potrafi jej zapisać**. Jego firmware kasuje pamięci SPI wyłącznie poleceniem Bulk Erase (`0xC7`), które M45PE16 ignoruje. minipro mimo to wypisuje `Erasing... OK`, następnie zapisuje dane na nieskasowaną pamięć i weryfikacja kończy się błędem. W kości zostaje `stare AND nowe`. Profil `M45PE16` w bazie minipro jest zdefiniowany tylko dla T48/T56. Dla TL866II+ nie ma algorytmu, a aktualizacja firmware programatora go nie dodaje.
 
@@ -76,7 +116,7 @@ minipro -p "M45PE16@SOIC8" -D            # oczekiwane: Chip ID: 0x204015  OK
 minipro -p "M45PE16@SOIC8" -r dump.bin
 ```
 
-### 3.2 ESP32 / ESP8266 + flashrom: odczyt i zapis ✅
+### 4.2 ESP32 / ESP8266 + flashrom: odczyt i zapis ✅
 
 flashrom obsługuje M45PE16 (łącznie z kasowaniem sektorów) i komunikuje się z ESP przez USB-UART protokołem `serprog`.
 
@@ -134,7 +174,7 @@ sha256sum new.bin check.bin                     # muszą być identyczne
 
 Jeśli przy wykrywaniu pojawia się `id1 0xff` (MISO podciągnięte, kość milczy), sprawdź zasilanie i Reset na pinach 6 i 3 oraz okablowanie. Jeśli również TL866 odczytuje `0xff`, prawie zawsze winne jest błędne podłączenie.
 
-## 4. Skąd wziąć szablon
+## 5. Skąd wziąć szablon
 
 Potrzebny jest pełny, 2-megabajtowy zrzut NVRAM z **działającej** karty tego samego modelu (ten sam PCI subsystem ID: `103c:1930` dla 534FLR-SFP+). Z działającej karty w serwerze z Linuksem:
 
@@ -159,9 +199,9 @@ python3 tools/nvmtool.py sanitize working_dump.bin -o template.bin
 # MAC -> 02:4e:56:4d:00:00, SN -> XXXXXXXXXX, kod daty -> 0000
 ```
 
-## 5. Budowa obrazu dla własnej karty
+## 6. Budowa obrazu dla własnej karty
 
-Najpierw koniecznie odczytaj i zachowaj oryginalną zawartość swojej kości (rozdział 3), a potem ją przeanalizuj:
+Najpierw koniecznie odczytaj i zachowaj oryginalną zawartość swojej kości (rozdziały 3–4), a potem ją przeanalizuj:
 
 ```
 python3 tools/nvmtool.py info my_card_original.bin
@@ -189,17 +229,17 @@ Co robi `build`:
 
 Wersje firmware i konfiguracja pochodzą z szablonu. Dlatego pola wersji V1/V3/V6 w VPD opisują firmware szablonu i tak właśnie powinno być.
 
-## 6. Pełna procedura odzyskiwania
+## 7. Pełna procedura odzyskiwania
 
-1. Wylutować M45PE16 z karty (albo użyć klipsa, pamiętając o niestandardowym rozkładzie wyprowadzeń).
-2. Odczytać dwukrotnie i porównać (`cmp`). Zachować oryginalny zrzut.
-3. `nvmtool.py info original.bin` — potwierdzić diagnozę.
-4. Zrobić szablon z działającej karty (`sanitize`), a następnie `build ... --from-dump original.bin`.
-5. Zapisać przez ESP + flashrom, odczytać ponownie i porównać SHA-256.
-6. Wlutować kość z powrotem (pin 1 — kropka, zgodnie z oznaczeniem na płytce).
-7. Uruchomić serwer: w `dmesg | grep -iE 'bnx2x|MCP'` nie może być `BAD MCP validity signature`, a oba porty muszą pojawić się z twoimi adresami MAC.
+1. Dwukrotnie wykonać kopię pamięci i porównać: z Linuksa przez `bnx2x_nvm.py read` (rozdział 3) albo programatorem po wylutowaniu (rozdział 4).
+2. `nvmtool.py info backup.bin` i `bnx2x_nvm.py trace` — potwierdzić diagnozę.
+3. Użyć gotowego szablonu albo zrobić własny z działającej karty (`sanitize`), a następnie `nvmtool.py build ... --from-dump backup.bin`.
+4. Zapisać obraz: `bnx2x_nvm.py write` z systemu albo przez ESP + flashrom. Odczytać ponownie i porównać SHA-256.
+5. Jeśli kość była wylutowana, wlutować ją z powrotem (pin 1 — kropka, zgodnie z oznaczeniem na płytce).
+6. Odłączyć zasilanie serwera na 30–60 s, potem włączyć.
+7. W `dmesg | grep -iE 'bnx2x|MCP'` nie może być `BAD MCP validity signature`, a oba porty muszą pojawić się z twoimi adresami MAC.
 
-Firmware aktualizuj później wyłącznie narzędziami HPE (SPP / Smart Component), nigdy przez `ethtool -f`, i przed każdą aktualizacją rób zrzut pamięci.
+Firmware aktualizuj później wyłącznie narzędziami HPE na obsługiwanym systemie, nigdy przez `ethtool -f`, i przed każdą aktualizacją rób zrzut pamięci.
 
 ## Zastrzeżenie
 
