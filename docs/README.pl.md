@@ -90,6 +90,7 @@ sha256sum my_card_new.bin check.bin               # muszą być identyczne
 - `write` zapisuje ponownie tylko różniące się strony po 256 bajtów (zwykle kilkaset, to sekundy), a potem odczytuje i porównuje całą pamięć.
 - Kontroler NVRAM karty sam kasuje każdą stronę, więc M45PE16 daje się zapisać, choć TL866II+ tego nie potrafi.
 - Po zapisie **wyłącz serwer i odłącz zasilanie na 30–60 s**. MCP działa na zasilaniu dyżurnym i wczytuje bootcode ponownie dopiero po pełnym odłączeniu zasilania.
+- ⚠️ **Nigdy nie odwołuj się do BAR0, gdy do karty przypisany jest sterownik bnx2x.** Odczyt równoległy z działającym sterownikiem wywołał błędy parzystości (`Parity errors detected`, `PXP hw attention`), a port przestał działać z komunikatem `Recovery failed. Power cycle needed`. `bnx2x_nvm.py` odmawia pracy z przypisaną funkcją. Na działającej karcie używaj `ethtool -e <iface> raw on > backup.bin`.
 - Jeśli zapis zostanie przerwany, karta może zniknąć z magistrali PCI; wtedy użyj zewnętrznego programatora (rozdział 4) i kopii zapasowej.
 
 ## 4. Programatory

@@ -90,6 +90,7 @@ sha256sum my_card_new.bin check.bin               # must be identical
 - `write` rewrites only the 256-byte pages that differ (typically a few hundred, a few seconds) and then reads back and compares the whole flash.
 - The adapter's NVRAM controller erases every page itself, so this works with the M45PE16 even though the TL866II+ cannot write it.
 - After writing, **shut the server down and remove AC power for 30–60 s**. The MCP runs on standby power and reloads its bootcode only after a full power cycle.
+- ⚠️ **Never access BAR0 while the bnx2x driver is bound to the card.** Reading it concurrently with a running driver triggered parity errors (`Parity errors detected`, `PXP hw attention`); the port went down with `Recovery failed. Power cycle needed`. `bnx2x_nvm.py` refuses to run on a bound function. On a working card use `ethtool -e <iface> raw on > backup.bin` instead.
 - If a write is interrupted, the card may disappear from the PCI bus; then use an external programmer (section 4) with the backup.
 
 ## 4. Programmers
