@@ -1,0 +1,10 @@
+# Firmware images and dumps contain proprietary code and card identity (MACs, serial numbers)
+*.bin
+*.BIN
+*.rom
+# PlatformIO
+.pio/
+.vscode/
+__pycache__/
+# ...except the published sanitized template(s)
+!templates/*.bin
